@@ -1,6 +1,6 @@
 'use strict';
 const canvas = document.querySelector('#game'), ctx = canvas.getContext('2d');
-const ui = Object.fromEntries(['status','detail','percent','returns','progressFill','progressTrack','start','restart','modeButtons','modeDrag','directionPad','joystick','joystickKnob','controlHint','stage','sceneOverlay','overlayTitle','overlayDetail','overlayStart','toast','settingsDialog','openSettings','closeSettings','doneSettings','photoStatus'].map(id => [id, document.querySelector('#'+id)]));
+const ui = Object.fromEntries(['status','detail','percent','returns','progressFill','progressTrack','start','restart','modeButtons','modeDrag','directionPad','joystick','joystickKnob','controlHint','stage','sceneOverlay','overlayTitle','overlayDetail','overlayStart','toast','settingsDialog','openSettings','closeSettings','doneSettings','photoStatus','cropDialog','cropTitle','cropCanvas','cropSize','cropSizeValue','cropPreview','cropApply','cropCancel','cropReset','cropStatus','collisionDialog','collisionCanvas','collisionTitle','collisionMessage','collisionCheckpoint','collisionContinue','collisionClose'].map(id => [id, document.querySelector('#'+id)]));
 const FIELD = 736, WIDTH = FIELD;
 let HEIGHT = 660;
 const UNIT = 33, MAP_LENGTH = 121, WORLD = UNIT * MAP_LENGTH;
@@ -18,6 +18,7 @@ const zones = [
 ];
 const spawnPoints = [{x:FIELD/2,y:Y(2.5)},{x:FIELD/2,y:Y(37)},{x:FIELD/2,y:Y(82.5)}];
 const goal = {x:FIELD/2,y:74};
+const mazeHint = {x:FIELD-114,y:Y(37),r:36};
 // A connected maze with real branches, dead ends, and sliding gates on its route.
 function buildMaze(){
   const cols=5,rows=8,cell=132,left=38,top=Y(80)+132,thick=42;
@@ -63,6 +64,8 @@ function wallPose(wall,time=elapsed){return {...wall,[wall.axis]:wall[wall.axis]
 function mazeWalls(time=elapsed){return [...walls,...movingWalls.map(w=>wallPose(w,time))];}
 let player, camera, running, won, started, elapsed, visualTime=0, last=0, checkpoint, returns, bottles, strollers, particles, toast, lastZone;
 let controlMode = 'drag', gesture = null;
+let hintInside = false;
+let collisionKind = null;
 const heldButtons = new Map();
 function clearControls(){
   const captured=gesture?.id;gesture=null;keys.clear();heldButtons.clear();
@@ -81,16 +84,18 @@ function chooseMode(mode){
 ui.modeButtons.onclick=()=>chooseMode('buttons');ui.modeDrag.onclick=()=>chooseMode('drag');
 function zoneAt(y) {const p=(WORLD-y)/UNIT;return zones.find(z=>p>=z.from&&p<z.to)||zones[zones.length-1];}
 function makeObstacles(){
-  bottles=Array.from({length:19},(_,i)=>({x:70+(i*137)%590,y:Y(7.5)-i*45,r:25,vx:(i%2?1:-1)*(68+(i*23)%89),vy:(i%3?1:-1)*(42+(i*17)%55),phase:i*1.7}));
+  const bottleCount=29;
+  bottles=Array.from({length:bottleCount},(_,i)=>({x:70+(i*137)%590,y:Y(7.5)-(Y(7.5)-Y(32))*i/(bottleCount-1),r:25,vx:(i%2?1:-1)*(68+(i*23)%89),vy:(i%3?1:-1)*(42+(i*17)%55),phase:i*1.7}));
   strollers=[];
   for(let lane=0;lane<9;lane++)for(let j=0;j<(lane%3===1?2:1);j++)strollers.push({x:(lane*157+j*365)%FIELD,y:Y(88+lane*3),vx:(lane%2?-1:1)*(230+(lane%4)*35),w:76,h:60,lane});
 }
 function setMessage(title,detail){ui.status.textContent=title;ui.detail.textContent=detail;}
 function reset(){
-  clearControls();player={...spawnPoints[0],r:21,flash:0};camera=WORLD-HEIGHT;running=false;won=false;started=false;elapsed=0;checkpoint=0;returns=0;particles=[];toast=null;lastZone=null;makeObstacles();
+  closeCollision();cancelPhotoCrop();
+  clearControls();player={...spawnPoints[0],r:21,flash:0};camera=WORLD-HEIGHT;running=false;won=false;started=false;elapsed=0;checkpoint=0;returns=0;particles=[];toast=null;lastZone=null;hintInside=false;makeObstacles();
   ui.start.textContent='출발! ▶';syncHud();setMessage('안전한 땅 1 · 모험의 시작','위쪽으로 올라가면 엄마를 만날 수 있어요.');
 }
-function start(){if(ui.settingsDialog.open)return;if(won)reset();running=!running;started=true;clearControls();ui.start.textContent=running?'잠깐 쉬기 Ⅱ':'계속 가기 ▶';if(running){lastZone=null;}else setMessage('잠깐 쉬는 중 🌿','계속 가기를 누르면 그 자리에서 이어서 해요.');syncHud();}
+function start(){if(ui.settingsDialog.open||ui.cropDialog.open||ui.collisionDialog.open)return;if(won)reset();running=!running;started=true;clearControls();ui.start.textContent=running?'잠깐 쉬기 Ⅱ':'계속 가기 ▶';if(running){lastZone=null;}else setMessage('잠깐 쉬는 중 🌿','계속 가기를 누르면 그 자리에서 이어서 해요.');syncHud();}
 function pauseGame(){clearControls();if(!running)return;running=false;ui.start.textContent='계속 가기 ▶';setMessage('잠깐 쉬는 중 🌿','계속 가기를 누르면 그 자리에서 이어서 해요.');syncHud();}
 ui.start.onclick=ui.overlayStart.onclick=start;ui.restart.onclick=reset;
 ui.openSettings.onclick=()=>{pauseGame();if(!ui.settingsDialog.open)ui.settingsDialog.showModal();};
@@ -117,10 +122,22 @@ function fitCanvas(){
 }
 function returnTo(index,reason){
   player.x=spawnPoints[index].x;player.y=spawnPoints[index].y;player.flash=1.4;
+  hintInside=false;
   checkpoint=index;returns++;clearControls();camera=clamp(player.y-HEIGHT*.74,0,WORLD-HEIGHT);
   toast={time:2.6,text:reason+' · 안전한 땅 '+(index+1)+'로 돌아왔어요'};
   setMessage('다시 도전해요! 🌿',toast.text);lastZone=null;syncHud();
 }
+const collisionMessages={bottle:'분유를 먹느라 엄마한테 못가요!',maze:'꼬꼬맘이랑 노느라 엄마한테 못가요!',stroller:'유모차에서 잠들었어요'};
+function showCollision(type,index,reason){
+  if(ui.collisionDialog.open)return;
+  returnTo(index,reason);pauseGame();collisionKind=type;toast=null;
+  ui.collisionMessage.textContent=collisionMessages[type];ui.collisionCheckpoint.textContent='안전한 땅 '+(index+1)+'에서 다시 출발해요.';
+  ui.collisionCanvas.setAttribute('aria-label',collisionMessages[type]);setMessage('앗, 잠깐 쉬어 가요!',collisionMessages[type]);syncHud();drawCollisionArt(type);ui.collisionDialog.showModal();
+}
+function closeCollision(){collisionKind=null;if(ui.collisionDialog.open)ui.collisionDialog.close();clearControls();}
+ui.collisionClose.onclick=closeCollision;
+ui.collisionContinue.onclick=()=>{closeCollision();start();};
+ui.collisionDialog.addEventListener('close',()=>{if(!ui.collisionDialog.open){collisionKind=null;clearControls();}});
 function rectHit(x,y,r,box){const nearX=clamp(x,box.x,box.x+box.w),nearY=clamp(y,box.y,box.y+box.h);return (x-nearX)**2+(y-nearY)**2<r*r;}
 function finish(){
   won=true;running=false;clearControls();camera=0;player.x=goal.x-29;player.y=goal.y+12;
@@ -146,9 +163,12 @@ function step(dt){
   const p=(WORLD-player.y)/UNIT;
   if(p>=34&&p<40&&checkpoint<1){checkpoint=1;toast={time:2.2,text:'안전한 땅 2 도착! 이제 여기서 다시 시작해요'};setMessage('두 번째 쉼터 도착 🌿',toast.text);}
   if(p>=80&&p<85&&checkpoint<2){checkpoint=2;toast={time:2.2,text:'안전한 땅 3 도착! 엄마까지 마지막 구간이에요'};setMessage('세 번째 쉼터 도착 🌿',toast.text);}
-  for(const b of bottles)if(Math.hypot(player.x-b.x,player.y-b.y)<player.r+b.r){returnTo(0,'분유에 닿았어요');return;}
-  for(const wall of mazeWalls())if(rectHit(player.x,player.y,player.r,wall)){returnTo(1,'꼬꼬맘 벽에 닿았어요');return;}
-  for(const s of strollers)if(rectHit(player.x,player.y,player.r,{x:s.x-s.w/2,y:s.y-s.h/2,w:s.w,h:s.h})){returnTo(2,'유모차에 닿았어요');return;}
+  for(const b of bottles)if(Math.hypot(player.x-b.x,player.y-b.y)<player.r+b.r){showCollision('bottle',0,'분유에 닿았어요');return;}
+  for(const wall of mazeWalls())if(rectHit(player.x,player.y,player.r,wall)){showCollision('maze',1,'꼬꼬맘 벽에 닿았어요');return;}
+  for(const s of strollers)if(rectHit(player.x,player.y,player.r,{x:s.x-s.w/2,y:s.y-s.h/2,w:s.w,h:s.h})){showCollision('stroller',2,'유모차에 닿았어요');return;}
+  const onHint=Math.hypot(player.x-mazeHint.x,player.y-mazeHint.y)<=player.r+mazeHint.r;
+  if(onHint&&!hintInside){toast={time:4,text:'방향키로 진행하세요!'};setMessage('꼬꼬맘 미로 힌트',toast.text);lastZone=null;}
+  hintInside=onHint;
   if(Math.hypot(player.x-goal.x,player.y-goal.y)<53)finish();
 }
 function update(dt){if(running){const count=Math.ceil(dt/.008);for(let i=0;i<count&&running;i++)step(dt/count);if(!won){const aim=clamp(player.y-HEIGHT*.74,0,WORLD-HEIGHT);camera+=(aim-camera)*(1-Math.exp(-dt*10));}syncHud();}}
@@ -233,6 +253,11 @@ function landscape(){
   for(const x of [18,FIELD-18]){ctx.strokeStyle='#9ba885';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,HEIGHT);ctx.stroke();}
   for(const b of bottles)if(sy(b.y)>-70&&sy(b.y)<HEIGHT+70)bottle(b);
   for(const s of strollers)if(sy(s.y)>-65&&sy(s.y)<HEIGHT+65)stroller(s);
+  const hintY=sy(mazeHint.y);
+  if(hintY>-50&&hintY<HEIGHT+50){
+    rounded(mazeHint.x-43,hintY-32,86,64,18,hintInside?'#e8edcf':'#fff8dfe8',hintInside?'#9cad70':'#dac79a');
+    text('?',mazeHint.x,hintY-8,25,'#8c9c62','800');text('(힌트)',mazeHint.x,hintY+17,15,'#71834f');
+  }
   const gy=sy(goal.y);ellipse(goal.x,gy+47,74,16,'#dca7ad30');circle(goal.x,gy+5,54,'#fff1de');
   character('mom',goal.x+(won?29:0),gy,30,{happy:won});text(won?'💕':'엄마',goal.x,gy-54,won?30:17,'#a07276');
   if(won){character('hero',player.x,sy(player.y),24,{happy:true});text('♥',goal.x,gy+28,19,'#c77982');}
@@ -242,13 +267,120 @@ function landscape(){
 function draw(dt){visualTime+=dt;ctx.clearRect(0,0,WIDTH,HEIGHT);landscape();
   if(won)for(let i=0;i<8;i++){const t=(visualTime*.22+i*.15)%1;text('♥',goal.x+Math.sin(i*7)*90,170-t*150,17+i%3*5,'#d69ba3');}
   for(const p of particles){p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=90*dt;p.life-=dt;ctx.save();ctx.globalAlpha=Math.min(1,Math.max(0,p.life));ctx.translate(p.x,p.y);ctx.rotate(p.y*.025);ctx.fillStyle=p.color;ctx.fillRect(-3,-3,6,10);ctx.restore();}particles=particles.filter(p=>p.life>0&&p.y<HEIGHT);}
-function frame(now){const dt=clamp((now-last)/1000||0,0,.04);last=now;update(dt);draw(dt);requestAnimationFrame(frame);}
+// Personalized collision scenes. Kept independent from the world canvas context.
+function drawCollisionArt(type, time=visualTime){
+  const art=document.querySelector('#collisionCanvas');if(!art)return;
+  if(art.width!==480||art.height!==280){art.width=480;art.height=280;}
+  const g=art.getContext('2d');if(!g)return;
+  const oval=(x,y,rx,ry,color)=>{g.beginPath();g.ellipse(x,y,rx,ry,0,0,Math.PI*2);g.fillStyle=color;g.fill();};
+  const dot=(x,y,r,color)=>oval(x,y,r,r,color);
+  const box=(x,y,w,h,r,fill,stroke)=>{g.beginPath();g.roundRect(x,y,w,h,r);if(fill){g.fillStyle=fill;g.fill();}if(stroke){g.strokeStyle=stroke;g.lineWidth=2;g.stroke();}};
+  const line=(points,color,width=3)=>{g.beginPath();points.forEach(([x,y],i)=>i?g.lineTo(x,y):g.moveTo(x,y));g.strokeStyle=color;g.lineWidth=width;g.lineCap=g.lineJoin='round';g.stroke();};
+  const sparkle=(x,y,r,color)=>{g.save();g.translate(x,y);g.rotate(Math.PI/4);box(-r/2,-r/2,r,r,2,color);g.restore();};
+  const head=(x,y,r,angle=0)=>{
+    g.save();g.translate(x,y);g.rotate(angle);
+    dot(0,2,r+6,'#b89b7720');dot(0,0,r+4,'#fffdf4');
+    g.save();g.beginPath();g.arc(0,0,r,0,Math.PI*2);g.clip();
+    const photo=faces.hero,width=photo?.naturalWidth||0,height=photo?.naturalHeight||0;
+    if(width&&height){const side=Math.min(width,height);g.drawImage(photo,(width-side)/2,(height-side)/2,side,side,-r,-r,r*2,r*2);}
+    else{
+      dot(0,0,r,'#f4d2b0');oval(0,-r*.61,r*.77,r*.34,'#755a42');
+      for(const eyeX of [-r*.28,r*.28]){oval(eyeX,-r*.04,r*.052,r*.072,'#51463a');dot(eyeX-r*.013,-r*.065,r*.016,'#fffdf4');}
+      oval(-r*.44,r*.21,r*.13,r*.065,'#edb3a3');oval(r*.44,r*.21,r*.13,r*.065,'#edb3a3');
+      g.beginPath();g.arc(0,r*.12,r*.20,.15,Math.PI-.15);g.strokeStyle='#b46d62';g.lineWidth=3;g.stroke();
+    }
+    g.restore();g.beginPath();g.arc(0,0,r,0,Math.PI*2);g.strokeStyle='#fffdf4';g.lineWidth=3;g.stroke();g.restore();
+  };
+  const body=(x,y,color)=>{
+    oval(x,y+41,57,10,'#bbad8c20');
+    line([[x-21,y+21],[x-29,y+39]],'#f0cdaa',12);line([[x+21,y+21],[x+28,y+39]],'#f0cdaa',12);
+    oval(x-30,y+43,18,9,'#d9a057');oval(x+28,y+43,18,9,'#d9a057');
+    box(x-43,y-12,86,51,22,color);dot(x,y+13,4,'#fff9e4');
+  };
+  g.save();g.clearRect(0,0,480,280);
+  const colors={bottle:['#fff7df','#f5e9c7'],maze:['#fff8e9','#e8eccf'],stroller:['#eff6f2','#dde9e8']};
+  const palette=colors[type]||colors.bottle,background=g.createLinearGradient(0,0,0,280);background.addColorStop(0,palette[0]);background.addColorStop(1,palette[1]);
+  g.fillStyle=background;g.fillRect(0,0,480,280);
+  oval(51,57,72,51,'#ffffff46');oval(447,229,112,86,'#ffffff3d');
+  const bob=Math.sin(time*2.6)*2;
+  if(type==='bottle'){
+    oval(244,245,135,14,'#c7ac7330');
+    body(166,188,'#e4b76d');
+    line([[130,188],[108,168]],'#f0cdaa',15);dot(108,168,10,'#f5d7b5');
+    head(166,111+bob,74,-.07);
+    // A full milk bottle reaches the lower part of the face at its nipple.
+    g.save();g.translate(235,196+bob);g.rotate(-.80);
+    box(-27,-43,54,81,14,'#fffdf6','#b7c9bf');
+    box(-23,-6,46,39,10,'#edcd87');
+    box(-29,-49,58,13,5,'#98b6ac');box(-14,-60,28,13,7,'#e7bf9b');
+    box(-7,-72,14,20,7,'#f2d7b7');
+    box(-19,-30,5,54,3,'#ffffffc9');
+    for(let i=0;i<4;i++)line([[8,-25+i*12],[18,-25+i*12]],'#b7ad90',2);
+    g.restore();
+    line([[191,198],[216,211]],'#f0cdaa',15);dot(216,211,11,'#f5d7b5');
+    // A tiny cream moustache makes the drinking pose legible on any photo.
+    oval(180,153+bob,7,3,'#fffdf0');oval(192,153+bob,7,3,'#fffdf0');
+    dot(204,169+bob,3,'#fffdf0');
+    for(let i=0;i<5;i++){const x=310+i%2*43,y=52+i*32+Math.sin(time*2+i)*4;sparkle(x,y,7+i%2*3,i%2?'#fffdf1':'#dcb675');}
+    // Soft hearts and a curved glow around the bottle keep the scene playful.
+    g.globalAlpha=.65;line([[290,194],[300,183],[302,169]],'#d7b377',3);g.globalAlpha=1;
+  }else if(type==='maze'){
+    oval(245,247,172,13,'#b6ba8930');
+    body(134,191,'#e5b86f');
+    line([[99,194],[77,176]],'#f0cdaa',14);dot(77,176,10,'#f5d7b5');
+    line([[165,194],[193,170]],'#f0cdaa',14);dot(193,170,10,'#f5d7b5');
+    head(134,120+bob,69,-.04);
+    const bounce=Math.sin(time*3)*3;
+    g.drawImage(chickenSprite(Math.floor(time*3)%3),285,76+bounce,158,158);
+    // Directional eye gleams and two small electric trails point at the toy.
+    const eyeY=111+bob;
+    for(const eyeX of [114,153]){
+      oval(eyeX,eyeY,9,5,'#fffdf0dd');dot(eyeX+4,eyeY,3,'#4d666b');dot(eyeX+5,eyeY-1,1,'white');
+    }
+    const flicker=Math.sin(time*13)*2;
+    const trails=[[[166,107+bob],[207,99],[217,110+flicker],[240,100],[270,115]],[[170,120+bob],[205,130],[215,119-flicker],[241,132],[270,123]]];
+    g.globalAlpha=.25+.15*(1+Math.sin(time*8));
+    for(const path of trails)line(path,'#68a4ac',8);
+    g.globalAlpha=1;for(const path of trails)line(path,'#efbf52',3);
+    sparkle(174,104+bob,7,'#fff5a5');sparkle(267,121,6,'#edca66');
+    for(let i=0;i<3;i++)sparkle(322+i*34,48+Math.sin(time*3+i)*4,5,'#d9b965');
+    // The toy tilts and bounces subtly, as if inviting another round of play.
+  }else if(type==='stroller'){
+    oval(248,253,181,12,'#839ca023');
+    line([[109,177],[84,111],[56,99]],'#798f8a',8);line([[55,99],[38,99]],'#798f8a',9);
+    line([[129,185],[344,234]],'#7c918b',7);line([[365,184],[139,234]],'#7c918b',7);
+    for(const x of [136,367]){dot(x,235,21,'#607471');dot(x,235,12,'#faf5df');dot(x,235,4,'#b5c6bc');}
+    // Folded canopy sits behind the child and the blanket.
+    g.beginPath();g.moveTo(285,167);g.lineTo(285,119);g.bezierCurveTo(296,49,398,59,418,154);g.lineTo(416,181);g.closePath();g.fillStyle='#91b7b8';g.fill();
+    g.beginPath();g.moveTo(323,82);g.bezierCurveTo(359,84,385,120,388,160);g.strokeStyle='#c8dfd6';g.lineWidth=3;g.stroke();
+    g.beginPath();g.moveTo(354,83);g.lineTo(339,162);g.strokeStyle='#c8dfd680';g.stroke();
+    g.save();g.translate(165,147);g.rotate(-.15);box(-75,-23,143,60,25,'#fffdf1');box(-61,-11,119,38,18,'#eee9da');g.restore();
+    head(171,124+bob,56,-.62);
+    // Closed-eye marks and a small smile sit gently on top of the portrait.
+    g.save();g.translate(171,124+bob);g.rotate(-.62);
+    for(const x of [-17,18]){g.beginPath();g.arc(x,-4,8,.2,Math.PI-.2);g.strokeStyle='#63594dcc';g.lineWidth=2.7;g.stroke();}
+    g.restore();
+    // A plump two-colour quilt tucks in the face without hiding it.
+    g.save();g.beginPath();g.moveTo(172,158);g.bezierCurveTo(221,144,304,143,382,158);g.lineTo(380,201);g.bezierCurveTo(302,219,224,215,173,191);g.closePath();g.fillStyle='#9fc4d0';g.fill();g.clip();
+    for(let row=0;row<3;row++)for(let col=0;col<6;col++){const x=171+col*38,y=146+row*25;if((row+col)%2===0)box(x,y,38,25,3,'#e9d89e');sparkle(x+19,y+12,3.5,'#fff8e466');}
+    g.strokeStyle='#ffffff6f';g.lineWidth=1;for(let x=172;x<410;x+=38){g.beginPath();g.moveTo(x,146);g.lineTo(x,215);g.stroke();}for(let y=146;y<217;y+=25){g.beginPath();g.moveTo(172,y);g.lineTo(410,y);g.stroke();}g.restore();
+    g.beginPath();g.moveTo(100,181);g.bezierCurveTo(186,193,337,197,418,180);g.lineTo(402,214);g.bezierCurveTo(301,237,178,229,113,213);g.closePath();g.fillStyle='#b9d0bc';g.fill();g.strokeStyle='#8ead9d';g.lineWidth=2;g.stroke();
+    line([[112,188],[401,191]],'#e0e9d6',5);
+    // Floating sleep letters rise in three phases, without obscuring the face.
+    for(let i=0;i<3;i++){const phase=(time*.32+i*.28)%1;g.save();g.globalAlpha=Math.min(1,phase*4,(1-phase)*4);g.translate(204+i*31+phase*5,71-i*15-phase*18);g.rotate(-.10);g.font=`700 ${18+i*7}px system-ui, sans-serif`;g.fillStyle='#7198a5';g.fillText('z',0,0);g.restore();}
+    sparkle(65,52+Math.sin(time)*3,5,'#c4b783');sparkle(427,51,4,'#c4b783');
+  }
+  g.restore();
+}
+
+function frame(now){const dt=clamp((now-last)/1000||0,0,.04);last=now;update(dt);draw(dt);if(collisionKind&&ui.collisionDialog.open)drawCollisionArt(collisionKind);requestAnimationFrame(frame);}
 const valid=['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','w','a','s','d'];
 window.addEventListener('keydown',e=>{const key=e.key.length===1?e.key.toLowerCase():e.key;if(valid.includes(key)&&e.target.tagName!=='INPUT'){e.preventDefault();if(running)keys.add(key);}});
 window.addEventListener('keyup',e=>keys.delete(e.key.length===1?e.key.toLowerCase():e.key));
 window.addEventListener('blur',pauseGame);
 document.addEventListener('visibilitychange',()=>{if(document.hidden)pauseGame();});
 document.querySelectorAll('[data-key]').forEach(b=>{
+  b.ondragstart=b.oncontextmenu=e=>e.preventDefault();
   b.onpointerdown=e=>{if(!running||controlMode!=='buttons'||(e.pointerType==='mouse'&&e.button!==0))return;e.preventDefault();b.setPointerCapture(e.pointerId);heldButtons.set(e.pointerId,b.dataset.key);};
   b.onpointerup=b.onpointercancel=b.onlostpointercapture=e=>heldButtons.delete(e.pointerId);
 });
@@ -271,38 +403,109 @@ ui.joystick.onpointerup=ui.joystick.onpointercancel=ui.joystick.onlostpointercap
   clearControls();
 };
 const photoVersions={hero:0,mom:0},photoKey=name=>'gotomom.photo.'+name;
+let photoCrop=null,cropPointer=null,cropLoadVersion=0;
+const readPhotoFile=file=>new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=reject;reader.readAsDataURL(file);});
 function decodePhoto(src){return new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>img.naturalWidth&&img.naturalHeight?resolve(img):reject(Error('empty image'));img.onerror=()=>reject(Error('unsupported image'));img.src=src;});}
 async function loadPhoto(name,dataUrl,version=++photoVersions[name]){
   const img=await decodePhoto(dataUrl);if(version!==photoVersions[name])return null;
   const preview=new Image();preview.alt=name==='hero'?'주인공 사진':'엄마 사진';preview.src=dataUrl;
   faces[name]=img;document.querySelector('#'+name+'Preview').replaceChildren(preview);return img;
 }
+async function savePhotoData(name,data,version){
+  const loaded=await loadPhoto(name,data,version);if(!loaded)return false;
+  try{localStorage.setItem(photoKey(name),data);ui.photoStatus.textContent='사진이 캐릭터에 적용됐어요. 다음에도 이 기기에서 그대로 보여요.';}
+  catch{ui.photoStatus.textContent='사진이 적용됐어요. 이 브라우저에서는 저장이 제한되어 다음에 다시 골라 주세요.';}
+  return true;
+}
 async function selectPhoto(name,file){
   const version=++photoVersions[name];ui.photoStatus.textContent='사진을 준비하고 있어요…';
   try{
-    const original=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=reject;reader.readAsDataURL(file);});
+    const original=await readPhotoFile(file);
     const img=await decodePhoto(original),scale=Math.min(1,512/Math.max(img.naturalWidth,img.naturalHeight));
     const copy=document.createElement('canvas');copy.width=Math.max(1,Math.round(img.naturalWidth*scale));copy.height=Math.max(1,Math.round(img.naturalHeight*scale));
     const g=copy.getContext('2d');g.fillStyle='#fffaf0';g.fillRect(0,0,copy.width,copy.height);g.drawImage(img,0,0,copy.width,copy.height);
-    const data=copy.toDataURL('image/jpeg',.9),loaded=await loadPhoto(name,data,version);if(!loaded)return false;
-    try{localStorage.setItem(photoKey(name),data);ui.photoStatus.textContent='사진이 캐릭터에 적용됐어요. 다음에도 이 기기에서 그대로 보여요.';}
-    catch{ui.photoStatus.textContent='사진이 적용됐어요. 이 브라우저에서는 저장이 제한되어 다음에 다시 골라 주세요.';}
-    return true;
+    return await savePhotoData(name,copy.toDataURL('image/jpeg',.9),version);
   }catch{if(version===photoVersions[name])ui.photoStatus.textContent='사진을 읽지 못했어요. JPG·PNG 사진을 다시 골라 주세요.';return false;}
 }
+function clampCrop(){
+  if(!photoCrop)return;
+  const {img}=photoCrop,minSide=Math.min(img.naturalWidth,img.naturalHeight);
+  photoCrop.r=clamp(photoCrop.r,minSide*.1,minSide*.5);
+  photoCrop.x=clamp(photoCrop.x,photoCrop.r,img.naturalWidth-photoCrop.r);photoCrop.y=clamp(photoCrop.y,photoCrop.r,img.naturalHeight-photoCrop.r);
+}
+function cropArea(){clampCrop();return {x:photoCrop.x-photoCrop.r,y:photoCrop.y-photoCrop.r,size:photoCrop.r*2};}
+function cropImageBox(){
+  const img=photoCrop.img,scale=Math.min((ui.cropCanvas.width-32)/img.naturalWidth,(ui.cropCanvas.height-32)/img.naturalHeight);
+  const w=img.naturalWidth*scale,h=img.naturalHeight*scale;return {x:(ui.cropCanvas.width-w)/2,y:(ui.cropCanvas.height-h)/2,w,h,scale};
+}
+function drawCrop(){
+  if(!photoCrop)return;clampCrop();
+  const g=ui.cropCanvas.getContext('2d'),box=cropImageBox(),area=cropArea();
+  const x=box.x+photoCrop.x*box.scale,y=box.y+photoCrop.y*box.scale,r=photoCrop.r*box.scale;
+  g.clearRect(0,0,560,420);g.fillStyle='#edf0e5';g.fillRect(0,0,560,420);g.drawImage(photoCrop.img,box.x,box.y,box.w,box.h);
+  g.save();g.beginPath();g.rect(box.x,box.y,box.w,box.h);g.arc(x,y,r,0,Math.PI*2);g.fillStyle='#203827a6';g.fill('evenodd');g.restore();
+  g.beginPath();g.arc(x,y,r,0,Math.PI*2);g.strokeStyle='#fffdf2';g.lineWidth=4;g.stroke();
+  g.beginPath();g.arc(x,y,r+3,0,Math.PI*2);g.strokeStyle='#668c5d';g.lineWidth=2;g.stroke();
+  const p=ui.cropPreview.getContext('2d');p.clearRect(0,0,80,80);p.save();p.beginPath();p.arc(40,40,36,0,Math.PI*2);p.clip();p.drawImage(photoCrop.img,area.x,area.y,area.size,area.size,4,4,72,72);p.restore();
+  ui.cropSizeValue.textContent=ui.cropSize.value+'%';
+}
+function exportCrop(){
+  const area=cropArea(),output=document.createElement('canvas');output.width=output.height=512;
+  const g=output.getContext('2d');g.fillStyle='#fffaf0';g.fillRect(0,0,512,512);g.drawImage(photoCrop.img,area.x,area.y,area.size,area.size,0,0,512,512);return output.toDataURL('image/jpeg',.92);
+}
+function clearCropPointer(){const id=cropPointer?.id;cropPointer=null;if(id!==undefined&&ui.cropCanvas.hasPointerCapture(id))ui.cropCanvas.releasePointerCapture(id);}
+function cancelPhotoCrop(){
+  ++cropLoadVersion;
+  if(photoCrop){++photoVersions[photoCrop.name];photoCrop=null;ui.photoStatus.textContent='얼굴 선택을 취소했어요. 기존 사진은 그대로예요.';}
+  clearCropPointer();if(ui.cropDialog.open)ui.cropDialog.close();clearControls();
+}
+async function openPhotoCrop(name,file){
+  pauseGame();if(photoCrop)cancelPhotoCrop();const version=++photoVersions[name],session=++cropLoadVersion;ui.photoStatus.textContent='얼굴을 고를 사진을 준비하고 있어요…';
+  try{
+    const img=await decodePhoto(await readPhotoFile(file));if(version!==photoVersions[name]||session!==cropLoadVersion)return false;
+    photoCrop={name,img,version,x:img.naturalWidth/2,y:img.naturalHeight/2,r:Math.min(img.naturalWidth,img.naturalHeight)*.38};
+    ui.cropTitle.textContent=(name==='hero'?'주인공':'엄마')+' 얼굴 맞추기';ui.cropSize.value='76';ui.cropStatus.textContent='원 안에 얼굴이 들어오도록 맞춰 주세요.';
+    ui.cropApply.disabled=false;ui.cropSize.disabled=false;ui.cropDialog.showModal();drawCrop();return true;
+  }catch{if(version===photoVersions[name]&&session===cropLoadVersion)ui.photoStatus.textContent='사진을 읽지 못했어요. JPG·PNG 사진을 다시 골라 주세요.';return false;}
+}
+async function applyPhotoCrop(){
+  if(!photoCrop||ui.cropApply.disabled)return false;
+  const selection=photoCrop;ui.cropApply.disabled=true;ui.cropSize.disabled=true;ui.cropStatus.textContent='얼굴을 저장하고 있어요…';
+  try{
+    const saved=await savePhotoData(selection.name,exportCrop(),selection.version);if(!saved)return false;
+    if(photoCrop===selection){photoCrop=null;clearCropPointer();ui.cropDialog.close();}return true;
+  }catch{ui.cropStatus.textContent='얼굴을 저장하지 못했어요. 다시 시도해 주세요.';return false;}
+  finally{ui.cropApply.disabled=false;ui.cropSize.disabled=false;}
+}
+ui.cropApply.onclick=applyPhotoCrop;ui.cropCancel.onclick=cancelPhotoCrop;
+ui.cropDialog.addEventListener('close',()=>{if(!ui.cropDialog.open&&photoCrop)cancelPhotoCrop();});
+ui.cropReset.onclick=()=>{if(!photoCrop||ui.cropApply.disabled)return;photoCrop.x=photoCrop.img.naturalWidth/2;photoCrop.y=photoCrop.img.naturalHeight/2;ui.cropSize.value='76';photoCrop.r=Math.min(photoCrop.img.naturalWidth,photoCrop.img.naturalHeight)*.38;drawCrop();};
+ui.cropSize.oninput=()=>{if(!photoCrop)return;photoCrop.r=Math.min(photoCrop.img.naturalWidth,photoCrop.img.naturalHeight)*Number(ui.cropSize.value)/200;drawCrop();};
+function cropPoint(e){const rect=ui.cropCanvas.getBoundingClientRect(),box=cropImageBox();return {x:((e.clientX-rect.left)*ui.cropCanvas.width/rect.width-box.x)/box.scale,y:((e.clientY-rect.top)*ui.cropCanvas.height/rect.height-box.y)/box.scale};}
+ui.cropCanvas.onpointerdown=e=>{
+  if(!photoCrop||cropPointer||ui.cropApply.disabled||(e.pointerType==='mouse'&&e.button!==0))return;
+  const point=cropPoint(e),img=photoCrop.img;if(point.x<0||point.x>img.naturalWidth||point.y<0||point.y>img.naturalHeight)return;
+  e.preventDefault();ui.cropCanvas.setPointerCapture(e.pointerId);
+  if(Math.hypot(point.x-photoCrop.x,point.y-photoCrop.y)>photoCrop.r){photoCrop.x=point.x;photoCrop.y=point.y;clampCrop();}
+  cropPointer={id:e.pointerId,dx:point.x-photoCrop.x,dy:point.y-photoCrop.y};drawCrop();
+};
+ui.cropCanvas.onpointermove=e=>{if(!photoCrop||cropPointer?.id!==e.pointerId||ui.cropApply.disabled)return;e.preventDefault();const point=cropPoint(e);photoCrop.x=point.x-cropPointer.dx;photoCrop.y=point.y-cropPointer.dy;drawCrop();};
+ui.cropCanvas.onpointerup=ui.cropCanvas.onpointercancel=ui.cropCanvas.onlostpointercapture=e=>{if(cropPointer?.id===e.pointerId)clearCropPointer();};
+ui.cropCanvas.oncontextmenu=ui.cropCanvas.ondragstart=e=>e.preventDefault();
+ui.cropCanvas.addEventListener('keydown',e=>{if(!photoCrop||ui.cropApply.disabled)return;const moves={ArrowUp:[0,-1],ArrowDown:[0,1],ArrowLeft:[-1,0],ArrowRight:[1,0]},move=moves[e.key];if(!move)return;e.preventDefault();const amount=Math.min(photoCrop.img.naturalWidth,photoCrop.img.naturalHeight)*.015;photoCrop.x+=move[0]*amount;photoCrop.y+=move[1]*amount;drawCrop();});
 async function restorePhotos(){
   await Promise.all(['hero','mom'].map(async name=>{
     try{const saved=localStorage.getItem(photoKey(name));if(saved){const img=await loadPhoto(name,saved);if(img)ui.photoStatus.textContent='이 기기에 저장된 사진을 불러왔어요.';}}
     catch{ui.photoStatus.textContent='저장된 사진을 읽지 못했어요. 사진을 다시 골라 주세요.';}
   }));
 }
-for(const name of ['hero','mom'])document.querySelector('#'+name).onchange=async e=>{const file=e.target.files[0];if(file){pauseGame();await selectPhoto(name,file);}e.target.value='';};
+for(const name of ['hero','mom'])document.querySelector('#'+name).onchange=async e=>{const file=e.target.files[0];if(file)await openPhotoCrop(name,file);e.target.value='';};
 document.querySelectorAll('[data-remove-photo]').forEach(button=>button.onclick=()=>{
   const name=button.dataset.removePhoto;++photoVersions[name];faces[name]=null;
   document.querySelector('#'+name+'Preview').textContent=name==='hero'?'🧒':'👩';
   try{localStorage.removeItem(photoKey(name));}catch{}
   ui.photoStatus.textContent='사진을 지웠어요. 기본 캐릭터로 보여요.';
 });
-window.addEventListener('resize',fitCanvas);
+window.addEventListener('resize',()=>{fitCanvas();clearCropPointer();if(photoCrop)drawCrop();});
 if(typeof ResizeObserver!=='undefined')new ResizeObserver(fitCanvas).observe(ui.stage);
 chooseMode(controlMode);reset();fitCanvas();restorePhotos();requestAnimationFrame(frame);
