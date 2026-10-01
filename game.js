@@ -1,7 +1,8 @@
 'use strict';
 const canvas = document.querySelector('#game'), ctx = canvas.getContext('2d');
-const ui = Object.fromEntries(['status','detail','percent','returns','progressFill','start','restart','modeButtons','modeDrag','directionPad','dragHelp','controlHint'].map(id => [id, document.querySelector('#'+id)]));
-const WIDTH = 840, HEIGHT = 660, FIELD = 736;
+const ui = Object.fromEntries(['status','detail','percent','returns','progressFill','progressTrack','start','restart','modeButtons','modeDrag','directionPad','joystick','joystickKnob','controlHint','stage','sceneOverlay','overlayTitle','overlayDetail','overlayStart','toast','settingsDialog','openSettings','closeSettings','doneSettings','photoStatus'].map(id => [id, document.querySelector('#'+id)]));
+const FIELD = 736, WIDTH = FIELD;
+let HEIGHT = 660;
 const UNIT = 33, MAP_LENGTH = 121, WORLD = UNIT * MAP_LENGTH;
 const keys = new Set(), faces = {hero:null,mom:null};
 const Y = progress => WORLD - progress * UNIT;
@@ -65,15 +66,16 @@ let controlMode = 'drag', gesture = null;
 const heldButtons = new Map();
 function clearControls(){
   const captured=gesture?.id;gesture=null;keys.clear();heldButtons.clear();
-  if(captured!==undefined&&canvas.hasPointerCapture(captured))canvas.releasePointerCapture(captured);
+  ui.joystick.style.setProperty('--stick-x','0px');ui.joystick.style.setProperty('--stick-y','0px');
+  if(captured!==undefined&&ui.joystick.hasPointerCapture(captured))ui.joystick.releasePointerCapture(captured);
 }
 function chooseMode(mode){
   clearControls();controlMode=mode;
   ui.modeButtons.setAttribute('aria-pressed',String(mode==='buttons'));
   ui.modeDrag.setAttribute('aria-pressed',String(mode==='drag'));
-  ui.directionPad.hidden=mode!=='buttons';ui.dragHelp.hidden=mode!=='drag';
+  ui.directionPad.hidden=mode!=='buttons';ui.joystick.hidden=mode!=='drag';
   ui.controlHint.textContent=mode==='drag'
-    ?'화면 어디서든 누른 채 원하는 방향으로 밀어요. 손을 떼면 멈춰요.'
+    ?'오른쪽 조이스틱을 밀어요. 손을 떼면 멈춰요.'
     :'아래 방향 버튼을 누르고 있으면 움직여요. 손을 떼면 멈춰요.';
 }
 ui.modeButtons.onclick=()=>chooseMode('buttons');ui.modeDrag.onclick=()=>chooseMode('drag');
@@ -88,12 +90,30 @@ function reset(){
   clearControls();player={...spawnPoints[0],r:21,flash:0};camera=WORLD-HEIGHT;running=false;won=false;started=false;elapsed=0;checkpoint=0;returns=0;particles=[];toast=null;lastZone=null;makeObstacles();
   ui.start.textContent='출발! ▶';syncHud();setMessage('안전한 땅 1 · 모험의 시작','위쪽으로 올라가면 엄마를 만날 수 있어요.');
 }
-function start(){if(won)reset();running=!running;started=true;clearControls();ui.start.textContent=running?'잠깐 쉬기 Ⅱ':'계속 가기 ▶';if(running){lastZone=null;syncHud();}else setMessage('잠깐 쉬는 중 🌿','계속 가기를 누르면 그 자리에서 이어서 해요.');}
-ui.start.onclick=start;ui.restart.onclick=reset;
+function start(){if(ui.settingsDialog.open)return;if(won)reset();running=!running;started=true;clearControls();ui.start.textContent=running?'잠깐 쉬기 Ⅱ':'계속 가기 ▶';if(running){lastZone=null;}else setMessage('잠깐 쉬는 중 🌿','계속 가기를 누르면 그 자리에서 이어서 해요.');syncHud();}
+function pauseGame(){clearControls();if(!running)return;running=false;ui.start.textContent='계속 가기 ▶';setMessage('잠깐 쉬는 중 🌿','계속 가기를 누르면 그 자리에서 이어서 해요.');syncHud();}
+ui.start.onclick=ui.overlayStart.onclick=start;ui.restart.onclick=reset;
+ui.openSettings.onclick=()=>{pauseGame();if(!ui.settingsDialog.open)ui.settingsDialog.showModal();};
+ui.closeSettings.onclick=ui.doneSettings.onclick=()=>ui.settingsDialog.close();
+ui.settingsDialog.addEventListener('close',clearControls);
 function syncHud(){
   const progress=won?MAP_LENGTH:clamp(Math.floor((WORLD-player.y)/UNIT),0,MAP_LENGTH);
   ui.percent.textContent=progress;ui.progressFill.style.width=progress/MAP_LENGTH*100+'%';ui.returns.textContent='쉼터로 돌아간 횟수 '+returns;
+  ui.progressTrack.setAttribute('aria-valuenow',String(progress));
   const zone=zoneAt(player.y);if(running&&!won&&zone!==lastZone&&!toast){setMessage(zone.name,zone.sub);lastZone=zone;}
+  ui.sceneOverlay.hidden=running;
+  ui.sceneOverlay.className='scene-overlay'+(won?' celebration':'');
+  ui.overlayTitle.textContent=won?'엄마 품에 도착했어요! 💕':started?'잠깐 쉬어 가요 🌿':'엄마 만나러 떠날까요?';
+  ui.overlayDetail.textContent=won?'정말 잘했어! 만나서 행복해 ♥':started?'준비되면 그 자리에서 다시 출발해요.':'사진·설정에서 얼굴을 고르고, 아래 조작부로 위로 올라가요!';
+  ui.overlayStart.textContent=won?'한 번 더! ▶':started?'계속 가기 ▶':'출발! ▶';
+  ui.toast.hidden=!toast||!running;if(toast)ui.toast.textContent=toast.text;
+}
+function fitCanvas(){
+  const rect=canvas.getBoundingClientRect();if(!rect.width||!rect.height)return;
+  const nextHeight=Math.max(100,Math.round(FIELD*rect.height/rect.width));
+  if(canvas.width===WIDTH&&HEIGHT===nextHeight)return;
+  HEIGHT=nextHeight;canvas.width=WIDTH;canvas.height=HEIGHT;clearControls();
+  if(player)camera=won?0:clamp(player.y-HEIGHT*.74,0,Math.max(0,WORLD-HEIGHT));
 }
 function returnTo(index,reason){
   player.x=spawnPoints[index].x;player.y=spawnPoints[index].y;player.flash=1.4;
@@ -119,9 +139,9 @@ function step(dt){
   if(gesture&&controlMode==='drag'&&!dx&&!dy){
     dx=gesture.x-gesture.originX;dy=gesture.y-gesture.originY;
     const distance=Math.hypot(dx,dy);
-    if(distance<=6){dx=dy=0;}else speed*=clamp((distance-6)/30,0,1);
+    if(distance<=6){dx=dy=0;}else speed*=clamp((distance-6)/Math.max(1,gesture.radius-6),0,1);
   }
-  const len=Math.hypot(dx,dy);if(len){player.x+=dx/len*speed*dt;player.y+=dy/len*speed*dt;}
+  const len=Math.hypot(dx,dy);player.walking=Boolean(len);if(len){player.x+=dx/len*speed*dt;player.y+=dy/len*speed*dt;}
   player.x=clamp(player.x,48,FIELD-48);player.y=clamp(player.y,28,WORLD-30);
   const p=(WORLD-player.y)/UNIT;
   if(p>=34&&p<40&&checkpoint<1){checkpoint=1;toast={time:2.2,text:'안전한 땅 2 도착! 이제 여기서 다시 시작해요'};setMessage('두 번째 쉼터 도착 🌿',toast.text);}
@@ -137,7 +157,21 @@ function rounded(x,y,w,h,r,fill,stroke){ctx.beginPath();ctx.roundRect(x,y,w,h,r)
 function circle(x,y,r,color){ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fillStyle=color;ctx.fill();}
 function text(str,x,y,size=16,color='#526345',weight='600'){ctx.textAlign='center';ctx.textBaseline='middle';ctx.font=weight+' '+size+'px system-ui';ctx.fillStyle=color;ctx.fillText(str,x,y);}
 function ellipse(x,y,rx,ry,color){ctx.beginPath();ctx.ellipse(x,y,rx,ry,0,0,Math.PI*2);ctx.fillStyle=color;ctx.fill();}
-function face(name,x,y,r){circle(x,y+3,r+4,'#35482c18');circle(x,y,r+3,'#fffaf0');const img=faces[name];if(img){ctx.save();ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.clip();const s=Math.min(img.width,img.height);ctx.drawImage(img,(img.width-s)/2,(img.height-s)/2,s,s,x-r,y-r,r*2,r*2);ctx.restore();}else{circle(x,y,r,name==='hero'?'#f8cfa2':'#efd3b9');text(name==='hero'?'🧒':'👩',x,y+1,r*1.5);}}
+function face(name,x,y,r){circle(x,y+3,r+4,'#35482c18');circle(x,y,r+3,'#fffaf0');const img=faces[name];if(img&&img.naturalWidth&&img.naturalHeight){ctx.save();ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.clip();const s=Math.min(img.naturalWidth,img.naturalHeight);ctx.drawImage(img,(img.naturalWidth-s)/2,(img.naturalHeight-s)/2,s,s,x-r,y-r,r*2,r*2);ctx.restore();}else{circle(x,y,r,name==='hero'?'#f8cfa2':'#efd3b9');text(name==='hero'?'🧒':'👩',x,y+1,r*1.5);}}
+function character(name,x,y,r,{walking=false,happy=false}={}){
+  const scale=r/21,beat=walking?Math.sin(elapsed*13):Math.sin(visualTime*2)*.2;
+  const color=name==='hero'?'#dfb56d':'#e8a1ac';
+  ctx.save();ctx.translate(x,y);ctx.scale(scale,scale);
+  ellipse(0,42,23,5,'#55613c22');
+  const limb=(x1,y1,x2,y2,tint,width)=>{ctx.strokeStyle=tint;ctx.lineWidth=width;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();};
+  limb(-7,26,-9-beat*3,36,'#ba9472',6);limb(7,26,9+beat*3,36,'#ba9472',6);
+  ellipse(-10-beat*3,38,7,4,'#856f53');ellipse(10+beat*3,38,7,4,'#856f53');
+  const reach=happy?28:22,leftHandY=happy?-14:21+beat*3,rightHandY=happy?-14:21-beat*3;
+  limb(-12,12,-reach,leftHandY,'#f0cba4',6);limb(12,12,reach,rightHandY,'#f0cba4',6);
+  circle(-reach,leftHandY,4,'#f3d8b5');circle(reach,rightHandY,4,'#f3d8b5');
+  rounded(-14,6,28,24,10,color);circle(0,20,2,'#fff9df');
+  ctx.restore();face(name,x,y,r);
+}
 function flower(x,y){for(let i=0;i<5;i++){const a=i*Math.PI*2/5;circle(x+Math.cos(a)*5,y+Math.sin(a)*5,3.4,'#fff8df');}circle(x,y,2.8,'#deb764');}
 const chickenSprites=[];
 function chickenSprite(pose){
@@ -199,53 +233,76 @@ function landscape(){
   for(const x of [18,FIELD-18]){ctx.strokeStyle='#9ba885';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,HEIGHT);ctx.stroke();}
   for(const b of bottles)if(sy(b.y)>-70&&sy(b.y)<HEIGHT+70)bottle(b);
   for(const s of strollers)if(sy(s.y)>-65&&sy(s.y)<HEIGHT+65)stroller(s);
-  const gy=sy(goal.y);ellipse(goal.x,gy+30,66,14,'#dca7ad40');circle(goal.x,gy,47,'#fff1de');face('mom',goal.x+(won?29:0),gy,30);text(won?'💕':'엄마',goal.x,gy-54,won?30:17,'#a07276');
-  if(won){rounded(goal.x-42,gy+17,86,24,12,'#f6c4bf');face('hero',player.x,sy(player.y),24);text('♥',goal.x,gy+16,19,'#c77982');}
-  else{ellipse(player.x,sy(player.y)+26,22,7,'#5a654326');rounded(player.x-12,sy(player.y)+12,24,20,8,'#dab576');if(player.flash<=0||Math.floor(visualTime*12)%2)face('hero',player.x,sy(player.y),player.r);circle(player.x-7,sy(player.y)+35,4,'#947f5a');circle(player.x+7,sy(player.y)+35,4,'#947f5a');}
+  const gy=sy(goal.y);ellipse(goal.x,gy+47,74,16,'#dca7ad30');circle(goal.x,gy+5,54,'#fff1de');
+  character('mom',goal.x+(won?29:0),gy,30,{happy:won});text(won?'💕':'엄마',goal.x,gy-54,won?30:17,'#a07276');
+  if(won){character('hero',player.x,sy(player.y),24,{happy:true});text('♥',goal.x,gy+28,19,'#c77982');}
+  else if(player.flash<=0||Math.floor(visualTime*12)%2)character('hero',player.x,sy(player.y),player.r,{walking:running&&player.walking});
   ctx.restore();
 }
-function drawGesture(){
-  if(!gesture||!running||controlMode!=='drag')return;
-  const r=canvas.getBoundingClientRect(),sx=WIDTH/r.width,syScale=HEIGHT/r.height;
-  const ox=gesture.canvasOriginX,oy=gesture.canvasOriginY;
-  const dx=gesture.x-gesture.originX,dy=gesture.y-gesture.originY,len=Math.hypot(dx,dy),factor=len?Math.min(len,36)/len:0;
-  ctx.save();ctx.beginPath();ctx.rect(0,0,FIELD,HEIGHT);ctx.clip();
-  ellipse(ox,oy,38*sx,38*syScale,'#fffdf04d');
-  ctx.strokeStyle='#547c6099';ctx.lineWidth=2*sx;ctx.beginPath();ctx.ellipse(ox,oy,38*sx,38*syScale,0,0,Math.PI*2);ctx.stroke();
-  ellipse(ox+dx*factor*sx,oy+dy*factor*syScale,13*sx,13*syScale,'#507453a8');
-  ctx.restore();
-}
-function minimap(){ctx.fillStyle='#f7f5e9';ctx.fillRect(FIELD,0,WIDTH-FIELD,HEIGHT);text('↑',788,29,20,'#879271');text('가는 길',788,56,11,'#7f896e');const x=773,w=30,top=94,h=HEIGHT-154;for(const z of zones){const y=top+(MAP_LENGTH-z.to)/MAP_LENGTH*h;rounded(x,y,w,(z.to-z.from)/MAP_LENGTH*h,3,z.color);}
-  rounded(x-3,top+camera/WORLD*h,w+6,HEIGHT/WORLD*h,4,null,'#95a17e');
-  const marker=top+clamp((player.y/WORLD),0,1)*h;circle(788,marker,9,'#fffdf4');circle(788,marker,5,'#537951');text('♥',788,top-15,18,'#c88e94');text('출발',788,top+h+17,10,'#939b84');
-}
-function overlay(){
-  if(!running&&!won){rounded(107,HEIGHT*.37,FIELD-214,158,24,'#fffdf3f5','#e3deca');text(started?'잠깐 쉬어 가요 🌿':'엄마 만나러 떠날까요?',FIELD/2,HEIGHT*.37+43,25);text(started?'출발했던 그 자리에서 이어서 가요.':'위로 쭉! 젖병, 미로, 유모차를 지나가요.',FIELD/2,HEIGHT*.37+81,14,'#8a8e77');text('아래 '+(started?'계속 가기':'출발')+' 버튼을 눌러 주세요',FIELD/2,HEIGHT*.37+119,14,'#668451');}
-  if(won){rounded(102,205,FIELD-204,185,25,'#fffdf3f0','#e9c8cd');text('엄마 품에 도착했어요!',FIELD/2,248,27,'#9c6972');text('정말 잘했어! 만나서 행복해 ♥',FIELD/2,287,19,'#ba8087');text('세 구간의 모험 완료 · 행복한 만남',FIELD/2,325,14,'#8d947d');text('한 번 더 누르면 다시 모험을 떠나요',FIELD/2,361,13,'#939881');for(let i=0;i<8;i++){const t=(visualTime*.22+i*.15)%1;text('♥',goal.x+Math.sin(i*7)*90,170-t*150,17+i%3*5,'#d69ba3');}}
-  if(toast&&running){rounded(74,18,FIELD-148,43,13,'#fffdf0ed');text(toast.text,FIELD/2,40,14,'#847457');}
-}
-function draw(dt){visualTime+=dt;ctx.clearRect(0,0,WIDTH,HEIGHT);landscape();minimap();overlay();drawGesture();for(const p of particles){p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=90*dt;p.life-=dt;ctx.save();ctx.globalAlpha=Math.min(1,Math.max(0,p.life));ctx.translate(p.x,p.y);ctx.rotate(p.y*.025);ctx.fillStyle=p.color;ctx.fillRect(-3,-3,6,10);ctx.restore();}particles=particles.filter(p=>p.life>0&&p.y<HEIGHT);}
+function draw(dt){visualTime+=dt;ctx.clearRect(0,0,WIDTH,HEIGHT);landscape();
+  if(won)for(let i=0;i<8;i++){const t=(visualTime*.22+i*.15)%1;text('♥',goal.x+Math.sin(i*7)*90,170-t*150,17+i%3*5,'#d69ba3');}
+  for(const p of particles){p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=90*dt;p.life-=dt;ctx.save();ctx.globalAlpha=Math.min(1,Math.max(0,p.life));ctx.translate(p.x,p.y);ctx.rotate(p.y*.025);ctx.fillStyle=p.color;ctx.fillRect(-3,-3,6,10);ctx.restore();}particles=particles.filter(p=>p.life>0&&p.y<HEIGHT);}
 function frame(now){const dt=clamp((now-last)/1000||0,0,.04);last=now;update(dt);draw(dt);requestAnimationFrame(frame);}
 const valid=['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','w','a','s','d'];
 window.addEventListener('keydown',e=>{const key=e.key.length===1?e.key.toLowerCase():e.key;if(valid.includes(key)&&e.target.tagName!=='INPUT'){e.preventDefault();if(running)keys.add(key);}});
 window.addEventListener('keyup',e=>keys.delete(e.key.length===1?e.key.toLowerCase():e.key));
-window.addEventListener('blur',()=>{clearControls();if(running)start();});
-document.addEventListener('visibilitychange',()=>{if(document.hidden&&running)start();});
+window.addEventListener('blur',pauseGame);
+document.addEventListener('visibilitychange',()=>{if(document.hidden)pauseGame();});
 document.querySelectorAll('[data-key]').forEach(b=>{
   b.onpointerdown=e=>{if(!running||controlMode!=='buttons'||(e.pointerType==='mouse'&&e.button!==0))return;e.preventDefault();b.setPointerCapture(e.pointerId);heldButtons.set(e.pointerId,b.dataset.key);};
   b.onpointerup=b.onpointercancel=b.onlostpointercapture=e=>heldButtons.delete(e.pointerId);
 });
-canvas.onpointerdown=e=>{
+function moveStick(e){
+  const dx=e.clientX-gesture.originX,dy=e.clientY-gesture.originY,len=Math.hypot(dx,dy);
+  const factor=len?Math.min(len,gesture.radius)/len:0;
+  gesture.x=gesture.originX+dx*factor;gesture.y=gesture.originY+dy*factor;
+  ui.joystick.style.setProperty('--stick-x',dx*factor+'px');ui.joystick.style.setProperty('--stick-y',dy*factor+'px');
+}
+ui.joystick.onpointerdown=e=>{
   if(!running||controlMode!=='drag'||gesture||(e.pointerType==='mouse'&&e.button!==0))return;
-  const r=canvas.getBoundingClientRect(),x=(e.clientX-r.left)*WIDTH/r.width;
-  if(x<0||x>=FIELD)return;
-  e.preventDefault();canvas.setPointerCapture(e.pointerId);
-  gesture={id:e.pointerId,originX:e.clientX,originY:e.clientY,x:e.clientX,y:e.clientY,canvasOriginX:x,canvasOriginY:(e.clientY-r.top)*HEIGHT/r.height};
+  const r=ui.joystick.getBoundingClientRect();
+  const x=r.left+r.width/2,y=r.top+r.height/2;
+  e.preventDefault();ui.joystick.setPointerCapture(e.pointerId);
+  gesture={id:e.pointerId,originX:x,originY:y,x,y,radius:Math.min(36,r.height*3/11)};moveStick(e);
 };
-canvas.onpointermove=e=>{if(gesture?.id!==e.pointerId)return;e.preventDefault();gesture.x=e.clientX;gesture.y=e.clientY;};
-canvas.onpointerup=canvas.onpointercancel=canvas.onlostpointercapture=e=>{
+ui.joystick.onpointermove=e=>{if(gesture?.id!==e.pointerId)return;e.preventDefault();moveStick(e);};
+ui.joystick.onpointerup=ui.joystick.onpointercancel=ui.joystick.onlostpointercapture=e=>{
   if(gesture?.id!==e.pointerId)return;
-  gesture=null;if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);
+  clearControls();
 };
-for(const name of ['hero','mom']){let version=0;document.querySelector('#'+name).onchange=e=>{const file=e.target.files[0];if(!file)return;const current=++version,url=URL.createObjectURL(file),img=new Image();img.onload=()=>{if(current===version){faces[name]=img;img.alt=name==='hero'?'주인공 사진':'엄마 사진';document.querySelector('#'+name+'Preview').replaceChildren(img);}URL.revokeObjectURL(url);};img.onerror=()=>{URL.revokeObjectURL(url);setMessage('사진을 읽지 못했어요','JPG나 PNG 사진을 골라 주세요.');};img.src=url;};}
-chooseMode(controlMode);reset();requestAnimationFrame(frame);
+const photoVersions={hero:0,mom:0},photoKey=name=>'gotomom.photo.'+name;
+function decodePhoto(src){return new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>img.naturalWidth&&img.naturalHeight?resolve(img):reject(Error('empty image'));img.onerror=()=>reject(Error('unsupported image'));img.src=src;});}
+async function loadPhoto(name,dataUrl,version=++photoVersions[name]){
+  const img=await decodePhoto(dataUrl);if(version!==photoVersions[name])return null;
+  const preview=new Image();preview.alt=name==='hero'?'주인공 사진':'엄마 사진';preview.src=dataUrl;
+  faces[name]=img;document.querySelector('#'+name+'Preview').replaceChildren(preview);return img;
+}
+async function selectPhoto(name,file){
+  const version=++photoVersions[name];ui.photoStatus.textContent='사진을 준비하고 있어요…';
+  try{
+    const original=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=reject;reader.readAsDataURL(file);});
+    const img=await decodePhoto(original),scale=Math.min(1,512/Math.max(img.naturalWidth,img.naturalHeight));
+    const copy=document.createElement('canvas');copy.width=Math.max(1,Math.round(img.naturalWidth*scale));copy.height=Math.max(1,Math.round(img.naturalHeight*scale));
+    const g=copy.getContext('2d');g.fillStyle='#fffaf0';g.fillRect(0,0,copy.width,copy.height);g.drawImage(img,0,0,copy.width,copy.height);
+    const data=copy.toDataURL('image/jpeg',.9),loaded=await loadPhoto(name,data,version);if(!loaded)return false;
+    try{localStorage.setItem(photoKey(name),data);ui.photoStatus.textContent='사진이 캐릭터에 적용됐어요. 다음에도 이 기기에서 그대로 보여요.';}
+    catch{ui.photoStatus.textContent='사진이 적용됐어요. 이 브라우저에서는 저장이 제한되어 다음에 다시 골라 주세요.';}
+    return true;
+  }catch{if(version===photoVersions[name])ui.photoStatus.textContent='사진을 읽지 못했어요. JPG·PNG 사진을 다시 골라 주세요.';return false;}
+}
+async function restorePhotos(){
+  await Promise.all(['hero','mom'].map(async name=>{
+    try{const saved=localStorage.getItem(photoKey(name));if(saved){const img=await loadPhoto(name,saved);if(img)ui.photoStatus.textContent='이 기기에 저장된 사진을 불러왔어요.';}}
+    catch{ui.photoStatus.textContent='저장된 사진을 읽지 못했어요. 사진을 다시 골라 주세요.';}
+  }));
+}
+for(const name of ['hero','mom'])document.querySelector('#'+name).onchange=async e=>{const file=e.target.files[0];if(file){pauseGame();await selectPhoto(name,file);}e.target.value='';};
+document.querySelectorAll('[data-remove-photo]').forEach(button=>button.onclick=()=>{
+  const name=button.dataset.removePhoto;++photoVersions[name];faces[name]=null;
+  document.querySelector('#'+name+'Preview').textContent=name==='hero'?'🧒':'👩';
+  try{localStorage.removeItem(photoKey(name));}catch{}
+  ui.photoStatus.textContent='사진을 지웠어요. 기본 캐릭터로 보여요.';
+});
+window.addEventListener('resize',fitCanvas);
+if(typeof ResizeObserver!=='undefined')new ResizeObserver(fitCanvas).observe(ui.stage);
+chooseMode(controlMode);reset();fitCanvas();restorePhotos();requestAnimationFrame(frame);
